@@ -67,6 +67,9 @@ sh -c 'echo "done once"'
 Names can only contain letters, digits, `.`, `_` and `-`,
 so that colons in commands, as in `sh -c 'echo a:b'`, are not mistaken for names.
 Without a name, a command is named after the basename of its program.
+Names are made unique: a name already taken gets the first free index, e.g. `sh`, `sh-2`, `sh-3`.
+Names given in the file are kept when possible, and names derived from programs never take them.
+The renamed commands appear under their new names in `ps`, `ls`, `log` and `down`.
 
 Commands are split into words like the shell does, so quotes work as expected.
 Commands are not run through a shell though: use `sh -c '...'` for pipes, redirections or `&&`.
@@ -201,10 +204,13 @@ Only the path is used, so the directories stay the same when the file is edited.
 Under `$XDG_STATE_HOME/supervise/`, i.e. `~/.local/state/supervise/` by default:
 
 - `config.path`: the resolved path of the configuration file.
-- `<name>.run`: the PID of the `run` process of the command.
-- `<name>.pid`: the PID of the command itself.
+- `<name>.run`: the PID of the `run` process of the command, and its start time.
+- `<name>.pid`: the PID of the command itself, and its start time.
 - `<name>.cmd`: the command line the command was started with.
 - `<name>.exit`: the exit code of the last run of the command.
+
+A process is only considered alive when both its PID and start time match,
+so PIDs reused by other processes, e.g. after a reboot, are never mistaken for the commands.
 
 Under `$XDG_RUNTIME_DIR/supervise/`, created with `0700` permissions:
 
