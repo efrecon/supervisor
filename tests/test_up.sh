@@ -16,6 +16,8 @@ EOF
   _run=$(ps_field sleeper 3)
   _pid=$(ps_field sleeper 4)
   assert_eq sleep "$(cat "/proc/$_pid/comm")"
+  # The run process itself, not a subshell of up around it.
+  assert_contains "$(tr '\0' ' ' < "/proc/$_run/cmdline")" "run -n sleeper"
   assert_contains "$(supervise ps)" "sleep 300"
 
   assert_eq "sleeper: sleep 300
@@ -113,7 +115,7 @@ test_up_attached_stops_only_its_commands() {
   supervise up -d a
   wait_until state_is a running
 
-  "$TEST_SHELL" "$SUPERVISE" up > up.out 2>&1 &
+  exec "$TEST_SHELL" "$SUPERVISE" up > up.out 2>&1 &
   _up=$!
   wait_until state_is b running
   # Leave time for up to install its traps, once all commands are started.
@@ -152,7 +154,7 @@ EOF
   supervise up -d
   wait_until state_is tick running
   wait_until grep -q tick "$XDG_RUNTIME_DIR"/supervise/*/tick.log
-  "$TEST_SHELL" "$SUPERVISE" log -n 1 -f tick > follow.out 2>&1 &
+  exec "$TEST_SHELL" "$SUPERVISE" log -n 1 -f tick > follow.out 2>&1 &
   _log=$!
   # The last line, then new ones.
   wait_until lines_at_least follow.out 3
@@ -165,7 +167,7 @@ test_log_follows_from_end() {
   printf 'tick: sh -c "while true; do echo tick; sleep 0.2; done"\n' > supervise.cfg
   supervise up -d
   wait_until state_is tick running
-  "$TEST_SHELL" "$SUPERVISE" log -n 0 -f tick > follow.out 2>&1 &
+  exec "$TEST_SHELL" "$SUPERVISE" log -n 0 -f tick > follow.out 2>&1 &
   _log=$!
   wait_until grep -q tick follow.out
   kill "$_log"

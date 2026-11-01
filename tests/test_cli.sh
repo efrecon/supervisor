@@ -104,23 +104,25 @@ test_run_fails_without_command() {
 }
 
 test_run_stops_process_tree_on_term() {
-  "$TEST_SHELL" "$SUPERVISE" run -- sh -c 'sleep 300 & echo $! > child; wait' 2>/dev/null &
+  exec "$TEST_SHELL" "$SUPERVISE" run -- sh -c 'sleep 300 & echo $! > child; wait' 2>/dev/null &
   _run=$!
   wait_until [ -s child ]
   _child=$(cat child)
   kill -TERM "$_run"
   _rc=0
   wait "$_run" || _rc=$?
-  assert_eq 143 "$_rc" "exit code of run"
+  # Killed by TERM: 128 + 15 in most shells, 384 + 15 in yash.
+  [ "$((_rc & 127))" -eq 15 ] || fail "run not killed by TERM, exit code $_rc"
   wait_until gone "$_child"
 }
 
-test_run_through_shell_when_not_executable() {
-  # run calls the script again for its loggers, through the shell when the
-  # script is not executable.
+test_run_when_executable() {
+  # run calls the script again for its loggers, directly when it is executable.
+  # Other tests use a copy that is not executable, run with the shell under
+  # test.
   cp "$SUPERVISE" copy.sh
-  chmod -x copy.sh
-  run "$TEST_SHELL" copy.sh run -- sh -c 'echo hello'
+  chmod +x copy.sh
+  run ./copy.sh run -- sh -c 'echo hello'
   assert_eq 0 "$status"
   assert_match "$output" '^\[sh\] \[OUT\] .* hello$'
 }

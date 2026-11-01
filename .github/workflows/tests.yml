@@ -26,9 +26,15 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        shell: [bash, dash]
+        # bash and dash are the sh of most distributions, mksh the one of
+        # Android, and yash follows POSIX closely.
+        shell: [bash, dash, mksh, yash]
     steps:
       - uses: actions/checkout@v4
+      - name: Install ${{ matrix.shell }}
+        run: |
+          command -v ${{ matrix.shell }} ||
+            { sudo apt-get update && sudo apt-get install -y ${{ matrix.shell }}; }
       - name: Run the tests
         run: tests/run.sh
         env:

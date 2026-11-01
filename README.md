@@ -257,6 +257,7 @@ Each test runs in its own process and temporary directory, with private XDG dire
 so it does not interfere with running commands.
 The output follows the TAP format, and the exit code is `1` when a test fails.
 Set `TEST_SHELL` to run the tests, and the script, with another shell, e.g. `TEST_SHELL=dash tests/run.sh`.
+The tests run on every pull request with bash, dash, mksh, yash, and the ash of busybox.
 To test with the ash shell and utilities of busybox, run the tests in Alpine:
 
 ```sh

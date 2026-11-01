@@ -415,11 +415,13 @@ spawn() {
   [ -z "${_SPAWN_NAME:-}" ] && _SPAWN_NAME=$(basename "$_bin")
 
   # Spawn the process in the background, and remember its PID. Test printf
-  # first, so the process, and our loggers, inherit the result.
+  # first, so the process, and our loggers, inherit the result. Background
+  # commands are exec'ed: some shells, e.g. yash and busybox ash, run them as a
+  # child of a subshell otherwise, and $! would be the PID of that subshell.
   _printf_time_test
   trace "Spawning %s with arguments: %s" "$_bin" "$*"
   if [ -n "$_SPAWN_OUT" ]; then
-    _SUPERVISE_LOGFILE=$_SPAWN_OUT "$_bin" "$@" >> "$_SPAWN_OUT" 2>&1 &
+    exec env _SUPERVISE_LOGFILE="$_SPAWN_OUT" "$_bin" "$@" >> "$_SPAWN_OUT" 2>&1 &
   else
     # Route stdout and stderr to separate loggers through FIFOs, so $! remains
     # the PID of the executable. Each logger removes its FIFO once opened, the
@@ -427,10 +429,10 @@ spawn() {
     _fifo_dir=$(mktemp -d)
     mkfifo "$_fifo_dir/out" "$_fifo_dir/err"
     # shellcheck disable=SC2094,SC2086 # FIFOs only removed, shell may be empty.
-    { rm -f "$_fifo_dir/out"; rmdir "$_fifo_dir" 2>/dev/null || true; $_SUPERVISE_SHELL "$0" logger -n "$_SPAWN_NAME" OUT; } < "$_fifo_dir/out" > /dev/null &
+    { rm -f "$_fifo_dir/out"; rmdir "$_fifo_dir" 2>/dev/null || true; exec $_SUPERVISE_SHELL "$0" logger -n "$_SPAWN_NAME" OUT; } < "$_fifo_dir/out" > /dev/null &
     # shellcheck disable=SC2094,SC2086 # FIFOs only removed, shell may be empty.
-    { rm -f "$_fifo_dir/err"; rmdir "$_fifo_dir" 2>/dev/null || true; $_SUPERVISE_SHELL "$0" logger -n "$_SPAWN_NAME" ERR; } < "$_fifo_dir/err" > /dev/null &
-    "$_bin" "$@" > "$_fifo_dir/out" 2> "$_fifo_dir/err" &
+    { rm -f "$_fifo_dir/err"; rmdir "$_fifo_dir" 2>/dev/null || true; exec $_SUPERVISE_SHELL "$0" logger -n "$_SPAWN_NAME" ERR; } < "$_fifo_dir/err" > /dev/null &
+    exec "$_bin" "$@" > "$_fifo_dir/out" 2> "$_fifo_dir/err" &
   fi
   _spawned=$!
 
@@ -554,33 +556,18 @@ _config_id() {
   unset _path || true
 }
 
-# Wait up to 10 seconds in total for the processes passed as arguments to exit.
-# They are not children of this process, so poll for them to be gone. Fails
-# when some are still running.
-_wait_gone() {
-  _wtimeout=10
-  _wrc=0
-  for _wpid in "$@"; do
-    while kill -0 "$_wpid" 2>/dev/null && [ "$_wtimeout" -gt 0 ]; do
-      sleep 1
-      _wtimeout=$((_wtimeout - 1))
-    done
-    if kill -0 "$_wpid" 2>/dev/null; then
-      warn "PID %d still running" "$_wpid"
-      _wrc=1
-    fi
-  done
-  unset _wpid _wtimeout || true
-  return "$_wrc"
-}
-
 # Print the start time of the process which PID is $1, in clock ticks since
-# boot, the 22nd field of its stat file. Fails when the process is gone.
+# boot, the 22nd field of its stat file. Fails when the process is gone, or is a
+# zombie: it has exited, but its parent has not reaped it yet, e.g. in
+# containers which init does not reap orphans.
 _pid_start() {
   { IFS= read -r _stat < "/proc/$1/stat"; } 2>/dev/null || return 1
   # Remove the name of the executable, the state is then the 1st field.
   # shellcheck disable=SC2086 # We want to split the fields
   set -- ${_stat##*) }
+  case "$1" in
+    Z | X) return 1;;
+  esac
   printf %s\\n "${20}"
 }
 
@@ -590,6 +577,26 @@ _pid_record() {
   [ -n "${1:-}" ] || return 0
   _rstart=$(_pid_start "$1") || return 0
   printf '%s %s\n' "$1" "$_rstart"
+}
+
+# Wait up to 10 seconds in total for the processes passed as arguments to exit.
+# They are not children of this process, so poll for them to be gone, zombies
+# included. Fails when some are still running.
+_wait_gone() {
+  _wtimeout=10
+  _wrc=0
+  for _wpid in "$@"; do
+    while _pid_start "$_wpid" >/dev/null && [ "$_wtimeout" -gt 0 ]; do
+      sleep 1
+      _wtimeout=$((_wtimeout - 1))
+    done
+    if _pid_start "$_wpid" >/dev/null; then
+      warn "PID %d still running" "$_wpid"
+      _wrc=1
+    fi
+  done
+  unset _wpid _wtimeout || true
+  return "$_wrc"
 }
 
 supervise_run() {
@@ -799,7 +806,7 @@ supervise_down() {
   # shellcheck disable=SC2086 # We want to split the PIDs
   _wait_gone $_pids || true
   for _pair in $_stopping; do
-    if kill -0 "${_pair##*:}" 2>/dev/null; then
+    if _pid_start "${_pair##*:}" >/dev/null; then
       warn "down: %s did not stop, keeping its state" "${_pair%%:*}"
       _rc=1
     else
@@ -898,7 +905,7 @@ EOS
       _f=${_logdir}/${_cname}.log
       : >> "$_f"
       _lines=$(wc -l < "$_f")
-      tail -F -n +$((_lines + 1)) "$_f" 2>/dev/null &
+      exec tail -F -n +$((_lines + 1)) "$_f" 2>/dev/null &
       _tails="$_tails $!"
     done
   fi

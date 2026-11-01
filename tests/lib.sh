@@ -22,7 +22,7 @@ teardown() {
   for _p in "$XDG_STATE_HOME"/*/*/config.path; do
     [ -f "$_p" ] || continue
     SUPERVISE_STATE_HOME=${_p%/*/config.path} \
-      "$SUPERVISE" -s "$(cat "$_p")" down > /dev/null 2>&1 || true
+      "$TEST_SHELL" "$SUPERVISE" -s "$(cat "$_p")" down > /dev/null 2>&1 || true
   done
   # Kill what down missed, e.g. when it is broken: all the processes started
   # from this test inherit its state directory.
@@ -39,8 +39,9 @@ teardown() {
 }
 
 # Run supervise.sh with the arguments passed, using the shell under test. To
-# run it in the background, call "$TEST_SHELL" "$SUPERVISE" instead, so $! is
-# its PID and not the one of a subshell running this function.
+# run it in the background, call exec "$TEST_SHELL" "$SUPERVISE" ... & instead,
+# so $! is its PID: not the one of a subshell running this function, or the
+# command, as yash and busybox ash do.
 supervise() {
   "$TEST_SHELL" "$SUPERVISE" "$@"
 }
@@ -95,7 +96,12 @@ assert_match() {
 
 # Succeed when the process which PID is $1 is gone.
 gone() {
-  ! kill -0 "$1" 2>/dev/null
+  # Zombies are gone too: they have exited, but have not been reaped yet, e.g.
+  # in containers which init does not reap orphans.
+  case "$(sed 's/.*) //' "/proc/$1/stat" 2>/dev/null | cut -d ' ' -f 1)" in
+    '' | Z | X) return 0;;
+  esac
+  return 1
 }
 
 # Succeed when the file $1 has at least $2 lines.

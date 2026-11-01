@@ -3,7 +3,8 @@
 # Run the tests of supervise.sh: all the test_*() functions of the files passed
 # as arguments, or of all the tests/test_*.sh files. Each test runs in its own
 # process, in a temporary directory with private XDG directories. Set
-# TEST_SHELL to run the tests, and supervise.sh, with another shell, e.g. dash,
+# TEST_SHELL to run the tests, and all the processes of supervise.sh, with
+# another shell, e.g. dash,
 # TEST_ONLY to a pattern to only run the matching tests, and SUPERVISE to the
 # path of another copy of supervise.sh to test.
 
@@ -40,7 +41,14 @@ command -v timeout >/dev/null 2>&1 && _timeout="timeout $TEST_TIMEOUT"
 _n=0
 _failed=0
 _out=$(mktemp)
-trap 'rm -f "$_out"' EXIT
+# Test a copy of supervise.sh that is not executable, so that it calls itself
+# again, e.g. for run and logger, with the shell under test instead of its
+# shebang. The copy keeps its name, which names its directories.
+_copy=$(mktemp -d)
+trap 'rm -rf "$_out" "$_copy"' EXIT
+cp "$SUPERVISE" "$_copy/supervise.sh"
+chmod a-x "$_copy/supervise.sh"
+SUPERVISE=$_copy/supervise.sh
 for _file in "$@"; do
   _file=$(cd "$(dirname "$_file")" && pwd)/$(basename "$_file")
   # shellcheck disable=SC2013 # Function names have no spaces.

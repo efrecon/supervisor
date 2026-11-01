@@ -136,7 +136,7 @@ test_ps_descendants_leaves_first() {
 
 test_ps_children_and_kill_tree() {
   load_supervise
-  sh -c 'sleep 300 & sleep 300 & wait' &
+  exec sh -c 'sleep 300 & sleep 300 & wait' &
   _root=$!
   wait_until _has_children "$_root" 2
   _kids=$(ps_children "$_root")
@@ -242,20 +242,45 @@ test_pid_start_and_record() {
   assert_match "$_start" '^[0-9]+$'
   assert_eq "$$ $_start" "$(_pid_record $$)"
 
-  sleep 300 &
+  # A process that has exited. Not killed: some shells, e.g. mksh, lose
+  # signals sent to background jobs before they have started.
+  true &
   _pid=$!
-  kill "$_pid"
-  wait "$_pid" || true
+  wait "$_pid"
   run _pid_start "$_pid"
   assert_eq 1 "$status"
   assert_eq "" "$(_pid_record "$_pid")"
   assert_eq "" "$(_pid_record "")"
 }
 
+# Succeed when the process $1 is a zombie.
+_is_zombie() {
+  [ "$(sed 's/.*) //' "/proc/$1/stat" 2>/dev/null | cut -d ' ' -f 1)" = Z ]
+}
+
+test_zombies_are_gone() {
+  load_supervise
+  # A child of a process that never waits for it: it stays a zombie.
+  exec sh -c 'true & echo $! > zombie; exec sleep 300' &
+  _parent=$!
+  wait_until [ -s zombie ]
+  _zombie=$(cat zombie)
+  wait_until _is_zombie "$_zombie"
+  run _pid_start "$_zombie"
+  assert_eq 1 "$status"
+  printf '%s 1\n' "$_zombie" > zombie.pid
+  run _alive_pid zombie.pid
+  assert_eq 1 "$status"
+  run _wait_gone "$_zombie"
+  assert_eq 0 "$status"
+  kill "$_parent"
+  wait "$_parent" || true
+}
+
 test_pid_uptime() {
   load_supervise
   _hz=$(getconf CLK_TCK 2>/dev/null || echo 100)
-  sleep 300 &
+  exec sleep 300 &
   _pid=$!
   sleep 1
   assert_match "$(_pid_uptime "$_pid")" '^00:0[1-9]$'
@@ -267,7 +292,7 @@ test_pid_uptime() {
 
 test_alive_pid() {
   load_supervise
-  sleep 300 &
+  exec sleep 300 &
   _pid=$!
   _pid_record "$_pid" > ok.pid
   assert_eq "$_pid" "$(_alive_pid ok.pid)"
@@ -291,10 +316,9 @@ test_alive_pid() {
 
 test_wait_gone() {
   load_supervise
-  # Not a child of ours: children are zombies until reaped, and kill -0 still
-  # finds them.
+  # Not a child of ours, as with the run processes of up.
   _short=$(sh -c 'sleep 1 > /dev/null & echo $!')
-  kill -0 "$_short" || fail "Process gone too early"
+  gone "$_short" && fail "Process gone too early"
   run _wait_gone "$_short"
   assert_eq 0 "$status"
   gone "$_short" || fail "Process still alive"
