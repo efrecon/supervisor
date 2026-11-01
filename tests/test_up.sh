@@ -145,7 +145,10 @@ test_log_options() {
 }
 
 test_log_follows() {
-  printf 'tick: sh -c "while true; do echo tick \$(date +%%s%%N); sleep 0.2; done"\n' > supervise.cfg
+  # Numbered, so that every line is unique.
+  cat > supervise.cfg <<'EOF'
+tick: sh -c 'i=0; while true; do i=$((i + 1)); echo "tick $i"; sleep 0.2; done'
+EOF
   supervise up -d
   wait_until state_is tick running
   wait_until grep -q tick "$XDG_RUNTIME_DIR"/supervise/*/tick.log

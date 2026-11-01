@@ -229,6 +229,11 @@ test_config_id() {
 
   SUPERVISE_PATH=sub/my-file.cfg
   assert_match "$(_config_id)" '^my-file\.cfg-[0-9a-f]{12}$'
+
+  # The id stays the same once the file is gone.
+  rm "my file.cfg"
+  SUPERVISE_PATH="my file.cfg"
+  assert_eq "$_id" "$(_config_id)"
 }
 
 test_pid_start_and_record() {
@@ -245,6 +250,19 @@ test_pid_start_and_record() {
   assert_eq 1 "$status"
   assert_eq "" "$(_pid_record "$_pid")"
   assert_eq "" "$(_pid_record "")"
+}
+
+test_pid_uptime() {
+  load_supervise
+  _hz=$(getconf CLK_TCK 2>/dev/null || echo 100)
+  sleep 300 &
+  _pid=$!
+  sleep 1
+  assert_match "$(_pid_uptime "$_pid")" '^00:0[1-9]$'
+  kill "$_pid"
+  wait "$_pid" || true
+  run _pid_uptime "$_pid"
+  assert_eq 1 "$status"
 }
 
 test_alive_pid() {
@@ -333,7 +351,7 @@ test_log_rotate_respects_lock() {
   assert_eq content "$(cat app.log)" "rotated while locked"
 
   # A lock older than a minute is stale, and removed.
-  touch -d '5 minutes ago' app.log.lock
+  touch -t "$(date -d "@$(($(date +%s) - 300))" +%Y%m%d%H%M.%S)" app.log.lock
   _log_rotate "$TEST_DIR/app.log"
   assert_eq "" "$(cat app.log)"
   assert_eq content "$(cat app.log.1)"

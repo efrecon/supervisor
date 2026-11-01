@@ -257,6 +257,12 @@ Each test runs in its own process and temporary directory, with private XDG dire
 so it does not interfere with running commands.
 The output follows the TAP format, and the exit code is `1` when a test fails.
 Set `TEST_SHELL` to run the tests, and the script, with another shell, e.g. `TEST_SHELL=dash tests/run.sh`.
+To test with the ash shell and utilities of busybox, run the tests in Alpine:
+
+```sh
+docker run --rm -v "$PWD:/src:ro" -w /src alpine:3.22 tests/run.sh
+```
+
 Set `TEST_ONLY` to a pattern to only run the matching tests, e.g. `TEST_ONLY=rotate tests/run.sh`.
 
 ## Limitations

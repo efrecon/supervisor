@@ -544,7 +544,10 @@ supervise_logger() {
 # basename, made safe, followed by a short md5 of its resolved path. Only the
 # path is used, so the directories stay the same when the file is edited.
 _config_id() {
-  _path=$(readlink -f "$SUPERVISE_PATH")
+  # Resolve the directory when the file is gone, e.g. for down: readlink -f
+  # fails on missing files in busybox, and does the same in GNU coreutils.
+  _path=$(readlink -f "$SUPERVISE_PATH" 2>/dev/null) ||
+    _path=$(readlink -f "$(dirname "$SUPERVISE_PATH")")/$(basename "$SUPERVISE_PATH")
   printf '%s-%s\n' \
     "$(basename "$_path" | tr -c 'A-Za-z0-9._\n-' '_')" \
     "$(printf %s "$_path" | md5sum | cut -c 1-12)"
@@ -1067,6 +1070,24 @@ supervise_log() {
   unset _SUPERVISE_LOG_LINES _SUPERVISE_LOG_FOLLOW _logdir _f _name || true
 }
 
+# Print the time since the process which PID is $1 started, as the etime of ps,
+# i.e. [[dd-]hh:]mm:ss. This uses /proc and the clock ticks per second in _hz,
+# as not all ps can select a process, e.g. busybox.
+_pid_uptime() {
+  _ustart=$(_pid_start "$1") || return 1
+  read -r _unow _ < /proc/uptime
+  _usecs=$((${_unow%.*} - _ustart / _hz))
+  [ "$_usecs" -ge 0 ] || _usecs=0
+  if [ "$_usecs" -ge 86400 ]; then
+    printf '%d-%02d:%02d:%02d\n' "$((_usecs / 86400))" "$((_usecs % 86400 / 3600))" "$((_usecs % 3600 / 60))" "$((_usecs % 60))"
+  elif [ "$_usecs" -ge 3600 ]; then
+    printf '%02d:%02d:%02d\n' "$((_usecs / 3600))" "$((_usecs % 3600 / 60))" "$((_usecs % 60))"
+  else
+    printf '%02d:%02d\n' "$((_usecs / 60))" "$((_usecs % 60))"
+  fi
+  unset _ustart _unow _usecs || true
+}
+
 # Print the ps line of the command which name is $1, using the state in
 # _statedir. $2 is its command line in the file at SUPERVISE_PATH, empty when it
 # is not in the file anymore.
@@ -1082,7 +1103,7 @@ _ps_line() {
     # The run process is alive, the command might be waiting to restart.
     if _cpid=$(_alive_pid "${_statedir}/${1}.pid"); then
       _state=running
-      _uptime=$(ps -o etime= -p "$_cpid" | tr -d ' ')
+      _uptime=$(_pid_uptime "$_cpid" || echo -)
     else
       _state=restarting
       _cpid=-
@@ -1126,6 +1147,8 @@ supervise_ps() {
   [ "$#" -gt 0 ] && _wanted=" $* "
   _found=" "
   _statedir=${SUPERVISE_STATE_HOME}/$(_config_id)
+  # Clock ticks per second, for the uptimes. 100 on almost all Linux systems.
+  _hz=$(getconf CLK_TCK 2>/dev/null || echo 100)
 
   printf '%-15s %-18s %8s %8s %10s %4s  %s\n' NAME STATE RUN PID UPTIME EXIT COMMAND
   # Commands from the file, if it still exists.
@@ -1225,8 +1248,14 @@ EOF
 
 # How to run this script again, e.g. for run and logger: directly when it is
 # executable, through the shell running it otherwise, e.g. sh supervise.sh.
+# Busybox needs the name of its shell applet, e.g. on Alpine.
 _SUPERVISE_SHELL=
-[ -x "$0" ] || _SUPERVISE_SHELL=$(readlink /proc/$$/exe)
+if ! [ -x "$0" ]; then
+  _SUPERVISE_SHELL=$(readlink /proc/$$/exe)
+  case "$_SUPERVISE_SHELL" in
+    */busybox) _SUPERVISE_SHELL="$_SUPERVISE_SHELL sh";;
+  esac
+fi
 
 # Whether printf can format time, see _log. Empty until tested at the first log
 # line, inherited from the calling process otherwise. Exported, as we call
