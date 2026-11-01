@@ -1,0 +1,48 @@
+name: Tests
+
+on:
+  pull_request:
+
+permissions:
+  contents: read
+
+# Only test the latest commit of a pull request.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  lint:
+    name: Lint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Run shellcheck
+        run: shellcheck -x supervise.sh tests/*.sh
+
+  test:
+    name: Test (${{ matrix.shell }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        shell: [bash, dash]
+    steps:
+      - uses: actions/checkout@v4
+      - name: Run the tests
+        run: tests/run.sh
+        env:
+          TEST_SHELL: ${{ matrix.shell }}
+
+  # Single check to require in the branch protection rules, whatever the jobs
+  # above and their matrix become.
+  tests:
+    name: Tests
+    if: always()
+    needs: [lint, test]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check that all jobs passed
+        run: |
+          [ "${{ needs.lint.result }}" = "success" ]
+          [ "${{ needs.test.result }}" = "success" ]

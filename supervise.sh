@@ -11,6 +11,11 @@ if set -o | grep -q 'pipefail'; then set -o pipefail; fi
 : "${XDG_STATE_HOME:="$HOME/.local/state"}"
 : "${XDG_RUNTIME_DIR:="${TMPDIR:-/tmp}/runtime-$(id -u)"}"
 
+# Name to log under, and of our directories: the basename of this script
+# without its extension, computed once without forking. Changed by logger -n.
+_SUPERVISE_LOGNAME=${0##*/}
+_SUPERVISE_LOGNAME=${_SUPERVISE_LOGNAME%.*}
+
 # All following vars have defaults here, and can be set from the environment or
 # through the global options.
 
@@ -32,6 +37,16 @@ if set -o | grep -q 'pipefail'; then set -o pipefail; fi
 
 # Number of rotated log files to keep. Defaults to 5.
 : "${SUPERVISE_LOGKEEP:="5"}"
+
+# Directory for the state of the commands, e.g. their PIDs, one subdirectory
+# per configuration file. Defaults to a directory named after this script, e.g.
+# supervise, under the XDG state directory.
+: "${SUPERVISE_STATE_HOME:="${XDG_STATE_HOME}/${_SUPERVISE_LOGNAME}"}"
+
+# Directory for the logs of the commands, one subdirectory per configuration
+# file. Defaults to a directory named after this script, e.g. supervise, under
+# the XDG runtime directory.
+: "${SUPERVISE_RUNTIME_DIR:="${XDG_RUNTIME_DIR}/${_SUPERVISE_LOGNAME}"}"
 
 # Print the options documented in the getopts loop read from stdin.
 _usage_options() {
@@ -460,7 +475,9 @@ _log_rotate() {
   [ -n "${1:-}" ] || return 0
   _max=$(_bytes "$SUPERVISE_LOGSIZE")
   [ "$_max" -gt 0 ] || return 0
-  _size=$(wc -c < "$1" 2>/dev/null) || return 0
+  # Grouped, so the error of a missing file is silenced too: the redirection of
+  # stdin fails before the one of stderr is made.
+  _size=$({ wc -c < "$1"; } 2>/dev/null) || return 0
   [ "$((_size))" -ge "$_max" ] || return 0
   if ! mkdir "${1}.lock" 2>/dev/null; then
     [ -n "$(find "${1}.lock" -prune -mmin +1 2>/dev/null)" ] || return 0
@@ -738,7 +755,7 @@ supervise_down() {
   # Only the path matters, the file itself may have changed or be gone.
   [ -n "$SUPERVISE_PATH" ] || error "down: No file given, use -s"
 
-  _statedir=${XDG_STATE_HOME}/supervise/$(_config_id)
+  _statedir=${SUPERVISE_STATE_HOME}/$(_config_id)
   if [ ! -d "$_statedir" ]; then
     warn "down: Nothing started from %s" "$SUPERVISE_PATH"
     return 0
@@ -836,14 +853,14 @@ supervise_up() {
   # store the PIDs of their commands there. Remember where the file is, to
   # identify the directory.
   _id=$(_config_id)
-  _SUPERVISE_STATEDIR=${XDG_STATE_HOME}/supervise/${_id}
+  _SUPERVISE_STATEDIR=${SUPERVISE_STATE_HOME}/${_id}
   mkdir -p "$_SUPERVISE_STATEDIR"
   readlink -f "$SUPERVISE_PATH" > "${_SUPERVISE_STATEDIR}/config.path"
   debug "up: Storing PIDs in %s" "$_SUPERVISE_STATEDIR"
 
   # Logs go to the same subdirectory under the runtime directory, created
   # private as the XDG spec requires.
-  _logdir=${XDG_RUNTIME_DIR}/supervise/${_id}
+  _logdir=${SUPERVISE_RUNTIME_DIR}/${_id}
   (umask 077 && mkdir -p "$_logdir")
   debug "up: Storing logs in %s" "$_logdir"
   unset _id || true
@@ -1006,7 +1023,7 @@ supervise_log() {
   # Only the path matters, the file itself may have changed or be gone.
   [ -n "$SUPERVISE_PATH" ] || error "log: No file given, use -s"
 
-  _logdir=${XDG_RUNTIME_DIR}/supervise/$(_config_id)
+  _logdir=${SUPERVISE_RUNTIME_DIR}/$(_config_id)
   if [ ! -d "$_logdir" ]; then
     warn "log: No logs for %s, commands are only logged with up -d" "$SUPERVISE_PATH"
     return 0
@@ -1034,9 +1051,12 @@ supervise_log() {
   fi
 
   # Merge on the timestamp, i.e. the 3rd field, keeping the order of lines from
-  # the same second, rotated files included. Then follow new lines from all
+  # the same second, rotated files included. Nothing to print with -n 0: tail
+  # would exit at once and break the pipe. Then follow new lines from all
   # files, if requested, across rotations.
-  if [ -n "$_SUPERVISE_LOG_LINES" ]; then
+  if [ -n "$_SUPERVISE_LOG_LINES" ] && [ "$_SUPERVISE_LOG_LINES" -eq 0 ]; then
+    :
+  elif [ -n "$_SUPERVISE_LOG_LINES" ]; then
     _log_cat "$@" | sort -s -k3,3 | tail -n "$_SUPERVISE_LOG_LINES"
   else
     _log_cat "$@" | sort -s -k3,3
@@ -1105,7 +1125,7 @@ supervise_ps() {
   _wanted=
   [ "$#" -gt 0 ] && _wanted=" $* "
   _found=" "
-  _statedir=${XDG_STATE_HOME}/supervise/$(_config_id)
+  _statedir=${SUPERVISE_STATE_HOME}/$(_config_id)
 
   printf '%-15s %-18s %8s %8s %10s %4s  %s\n' NAME STATE RUN PID UPTIME EXIT COMMAND
   # Commands from the file, if it still exists.
@@ -1172,7 +1192,7 @@ supervise_ls() {
   [ -n "$SUPERVISE_PATH" ] || error "ls: No file given, use -s"
 
   _found=" "
-  _statedir=${XDG_STATE_HOME}/supervise/$(_config_id)
+  _statedir=${SUPERVISE_STATE_HOME}/$(_config_id)
   # Commands from the file, if it still exists.
   if [ -r "$SUPERVISE_PATH" ]; then
     _tab=$(printf '\t')
@@ -1214,12 +1234,8 @@ _SUPERVISE_SHELL=
 : "${_SUPERVISE_PRINTF_TIME:=""}"
 export _SUPERVISE_PRINTF_TIME
 
-# Internal state: list of live spawned PIDs, and name to log under, the basename
-# of this script without its extension, computed once without forking, unless
-# set by logger -n.
+# Internal state: list of live spawned PIDs.
 _SUPERVISE_PIDS=
-_SUPERVISE_LOGNAME=${0##*/}
-_SUPERVISE_LOGNAME=${_SUPERVISE_LOGNAME%.*}
 
 # Validate settings, whether set through options or from the environment.
 _bytes "$SUPERVISE_LOGSIZE" > /dev/null
