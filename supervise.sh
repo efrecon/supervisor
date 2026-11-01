@@ -168,9 +168,9 @@ _log() {
     "${_SUPERVISE_LOGNAME:-${0##*/}}" "$_lvl" "$_targ" "$@" \
     >&2 2>/dev/null || true
 }
-trace() { [ "$SUPERVISE_VERBOSE" -ge "3" ] && _log TRC "$@" || true ; }
-debug() { [ "$SUPERVISE_VERBOSE" -ge "2" ] && _log DBG "$@" || true ; }
-info() { [ "$SUPERVISE_VERBOSE" -ge "1" ] && _log NFO "$@" || true ; }
+trace() { if [ "$SUPERVISE_VERBOSE" -ge "3" ]; then _log TRC "$@"; fi; }
+debug() { if [ "$SUPERVISE_VERBOSE" -ge "2" ]; then _log DBG "$@"; fi; }
+info() { if [ "$SUPERVISE_VERBOSE" -ge "1" ]; then _log NFO "$@"; fi; }
 warn() { _log WRN "$@"; }
 error() { _log ERR "$@"; exit 1; }
 
