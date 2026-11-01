@@ -1,0 +1,64 @@
+name: Tests
+
+on:
+  pull_request:
+
+permissions:
+  contents: read
+
+# Only test the latest commit of a pull request.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  lint:
+    name: Lint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Run shellcheck
+        run: shellcheck -x supervise.sh tests/*.sh
+
+  test:
+    name: Test (${{ matrix.shell }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        # bash and dash are the sh of most distributions, mksh the one of
+        # Android, and yash follows POSIX closely.
+        shell: [bash, dash, mksh, yash]
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install ${{ matrix.shell }}
+        run: |
+          command -v ${{ matrix.shell }} ||
+            { sudo apt-get update && sudo apt-get install -y ${{ matrix.shell }}; }
+      - name: Run the tests
+        run: tests/run.sh
+        env:
+          TEST_SHELL: ${{ matrix.shell }}
+
+  # Alpine, where sh is the ash of busybox, and all utilities come from busybox.
+  ash:
+    name: Test (ash)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Run the tests in Alpine
+        run: docker run --rm -v "$PWD:/src:ro" -w /src alpine:3.22 tests/run.sh
+
+  # Single check to require in the branch protection rules, whatever the jobs
+  # above and their matrix become.
+  tests:
+    name: Tests
+    if: always()
+    needs: [lint, test, ash]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check that all jobs passed
+        run: |
+          [ "${{ needs.lint.result }}" = "success" ]
+          [ "${{ needs.test.result }}" = "success" ]
+          [ "${{ needs.ash.result }}" = "success" ]

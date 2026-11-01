@@ -11,6 +11,11 @@ if set -o | grep -q 'pipefail'; then set -o pipefail; fi
 : "${XDG_STATE_HOME:="$HOME/.local/state"}"
 : "${XDG_RUNTIME_DIR:="${TMPDIR:-/tmp}/runtime-$(id -u)"}"
 
+# Name to log under, and of our directories: the basename of this script
+# without its extension, computed once without forking. Changed by logger -n.
+_SUPERVISE_LOGNAME=${0##*/}
+_SUPERVISE_LOGNAME=${_SUPERVISE_LOGNAME%.*}
+
 # All following vars have defaults here, and can be set from the environment or
 # through the global options.
 
@@ -32,6 +37,16 @@ if set -o | grep -q 'pipefail'; then set -o pipefail; fi
 
 # Number of rotated log files to keep. Defaults to 5.
 : "${SUPERVISE_LOGKEEP:="5"}"
+
+# Directory for the state of the commands, e.g. their PIDs, one subdirectory
+# per configuration file. Defaults to a directory named after this script, e.g.
+# supervise, under the XDG state directory.
+: "${SUPERVISE_STATE_HOME:="${XDG_STATE_HOME}/${_SUPERVISE_LOGNAME}"}"
+
+# Directory for the logs of the commands, one subdirectory per configuration
+# file. Defaults to a directory named after this script, e.g. supervise, under
+# the XDG runtime directory.
+: "${SUPERVISE_RUNTIME_DIR:="${XDG_RUNTIME_DIR}/${_SUPERVISE_LOGNAME}"}"
 
 # Print the options documented in the getopts loop read from stdin.
 _usage_options() {
@@ -153,9 +168,9 @@ _log() {
     "${_SUPERVISE_LOGNAME:-${0##*/}}" "$_lvl" "$_targ" "$@" \
     >&2 2>/dev/null || true
 }
-trace() { [ "$SUPERVISE_VERBOSE" -ge "3" ] && _log TRC "$@" || true ; }
-debug() { [ "$SUPERVISE_VERBOSE" -ge "2" ] && _log DBG "$@" || true ; }
-info() { [ "$SUPERVISE_VERBOSE" -ge "1" ] && _log NFO "$@" || true ; }
+trace() { if [ "$SUPERVISE_VERBOSE" -ge "3" ]; then _log TRC "$@"; fi; }
+debug() { if [ "$SUPERVISE_VERBOSE" -ge "2" ]; then _log DBG "$@"; fi; }
+info() { if [ "$SUPERVISE_VERBOSE" -ge "1" ]; then _log NFO "$@"; fi; }
 warn() { _log WRN "$@"; }
 error() { _log ERR "$@"; exit 1; }
 
@@ -400,11 +415,13 @@ spawn() {
   [ -z "${_SPAWN_NAME:-}" ] && _SPAWN_NAME=$(basename "$_bin")
 
   # Spawn the process in the background, and remember its PID. Test printf
-  # first, so the process, and our loggers, inherit the result.
+  # first, so the process, and our loggers, inherit the result. Background
+  # commands are exec'ed: some shells, e.g. yash and busybox ash, run them as a
+  # child of a subshell otherwise, and $! would be the PID of that subshell.
   _printf_time_test
   trace "Spawning %s with arguments: %s" "$_bin" "$*"
   if [ -n "$_SPAWN_OUT" ]; then
-    _SUPERVISE_LOGFILE=$_SPAWN_OUT "$_bin" "$@" >> "$_SPAWN_OUT" 2>&1 &
+    exec env _SUPERVISE_LOGFILE="$_SPAWN_OUT" "$_bin" "$@" >> "$_SPAWN_OUT" 2>&1 &
   else
     # Route stdout and stderr to separate loggers through FIFOs, so $! remains
     # the PID of the executable. Each logger removes its FIFO once opened, the
@@ -412,10 +429,10 @@ spawn() {
     _fifo_dir=$(mktemp -d)
     mkfifo "$_fifo_dir/out" "$_fifo_dir/err"
     # shellcheck disable=SC2094,SC2086 # FIFOs only removed, shell may be empty.
-    { rm -f "$_fifo_dir/out"; rmdir "$_fifo_dir" 2>/dev/null || true; $_SUPERVISE_SHELL "$0" logger -n "$_SPAWN_NAME" OUT; } < "$_fifo_dir/out" > /dev/null &
+    { rm -f "$_fifo_dir/out"; rmdir "$_fifo_dir" 2>/dev/null || true; exec $_SUPERVISE_SHELL "$0" logger -n "$_SPAWN_NAME" OUT; } < "$_fifo_dir/out" > /dev/null &
     # shellcheck disable=SC2094,SC2086 # FIFOs only removed, shell may be empty.
-    { rm -f "$_fifo_dir/err"; rmdir "$_fifo_dir" 2>/dev/null || true; $_SUPERVISE_SHELL "$0" logger -n "$_SPAWN_NAME" ERR; } < "$_fifo_dir/err" > /dev/null &
-    "$_bin" "$@" > "$_fifo_dir/out" 2> "$_fifo_dir/err" &
+    { rm -f "$_fifo_dir/err"; rmdir "$_fifo_dir" 2>/dev/null || true; exec $_SUPERVISE_SHELL "$0" logger -n "$_SPAWN_NAME" ERR; } < "$_fifo_dir/err" > /dev/null &
+    exec "$_bin" "$@" > "$_fifo_dir/out" 2> "$_fifo_dir/err" &
   fi
   _spawned=$!
 
@@ -460,7 +477,9 @@ _log_rotate() {
   [ -n "${1:-}" ] || return 0
   _max=$(_bytes "$SUPERVISE_LOGSIZE")
   [ "$_max" -gt 0 ] || return 0
-  _size=$(wc -c < "$1" 2>/dev/null) || return 0
+  # Grouped, so the error of a missing file is silenced too: the redirection of
+  # stdin fails before the one of stderr is made.
+  _size=$({ wc -c < "$1"; } 2>/dev/null) || return 0
   [ "$((_size))" -ge "$_max" ] || return 0
   if ! mkdir "${1}.lock" 2>/dev/null; then
     [ -n "$(find "${1}.lock" -prune -mmin +1 2>/dev/null)" ] || return 0
@@ -527,40 +546,28 @@ supervise_logger() {
 # basename, made safe, followed by a short md5 of its resolved path. Only the
 # path is used, so the directories stay the same when the file is edited.
 _config_id() {
-  _path=$(readlink -f "$SUPERVISE_PATH")
+  # Resolve the directory when the file is gone, e.g. for down: readlink -f
+  # fails on missing files in busybox, and does the same in GNU coreutils.
+  _path=$(readlink -f "$SUPERVISE_PATH" 2>/dev/null) ||
+    _path=$(readlink -f "$(dirname "$SUPERVISE_PATH")")/$(basename "$SUPERVISE_PATH")
   printf '%s-%s\n' \
     "$(basename "$_path" | tr -c 'A-Za-z0-9._\n-' '_')" \
     "$(printf %s "$_path" | md5sum | cut -c 1-12)"
   unset _path || true
 }
 
-# Wait up to 10 seconds in total for the processes passed as arguments to exit.
-# They are not children of this process, so poll for them to be gone. Fails
-# when some are still running.
-_wait_gone() {
-  _wtimeout=10
-  _wrc=0
-  for _wpid in "$@"; do
-    while kill -0 "$_wpid" 2>/dev/null && [ "$_wtimeout" -gt 0 ]; do
-      sleep 1
-      _wtimeout=$((_wtimeout - 1))
-    done
-    if kill -0 "$_wpid" 2>/dev/null; then
-      warn "PID %d still running" "$_wpid"
-      _wrc=1
-    fi
-  done
-  unset _wpid _wtimeout || true
-  return "$_wrc"
-}
-
 # Print the start time of the process which PID is $1, in clock ticks since
-# boot, the 22nd field of its stat file. Fails when the process is gone.
+# boot, the 22nd field of its stat file. Fails when the process is gone, or is a
+# zombie: it has exited, but its parent has not reaped it yet, e.g. in
+# containers which init does not reap orphans.
 _pid_start() {
   { IFS= read -r _stat < "/proc/$1/stat"; } 2>/dev/null || return 1
   # Remove the name of the executable, the state is then the 1st field.
   # shellcheck disable=SC2086 # We want to split the fields
   set -- ${_stat##*) }
+  case "$1" in
+    Z | X) return 1;;
+  esac
   printf %s\\n "${20}"
 }
 
@@ -570,6 +577,26 @@ _pid_record() {
   [ -n "${1:-}" ] || return 0
   _rstart=$(_pid_start "$1") || return 0
   printf '%s %s\n' "$1" "$_rstart"
+}
+
+# Wait up to 10 seconds in total for the processes passed as arguments to exit.
+# They are not children of this process, so poll for them to be gone, zombies
+# included. Fails when some are still running.
+_wait_gone() {
+  _wtimeout=10
+  _wrc=0
+  for _wpid in "$@"; do
+    while _pid_start "$_wpid" >/dev/null && [ "$_wtimeout" -gt 0 ]; do
+      sleep 1
+      _wtimeout=$((_wtimeout - 1))
+    done
+    if _pid_start "$_wpid" >/dev/null; then
+      warn "PID %d still running" "$_wpid"
+      _wrc=1
+    fi
+  done
+  unset _wpid _wtimeout || true
+  return "$_wrc"
 }
 
 supervise_run() {
@@ -738,7 +765,7 @@ supervise_down() {
   # Only the path matters, the file itself may have changed or be gone.
   [ -n "$SUPERVISE_PATH" ] || error "down: No file given, use -s"
 
-  _statedir=${XDG_STATE_HOME}/supervise/$(_config_id)
+  _statedir=${SUPERVISE_STATE_HOME}/$(_config_id)
   if [ ! -d "$_statedir" ]; then
     warn "down: Nothing started from %s" "$SUPERVISE_PATH"
     return 0
@@ -779,7 +806,7 @@ supervise_down() {
   # shellcheck disable=SC2086 # We want to split the PIDs
   _wait_gone $_pids || true
   for _pair in $_stopping; do
-    if kill -0 "${_pair##*:}" 2>/dev/null; then
+    if _pid_start "${_pair##*:}" >/dev/null; then
       warn "down: %s did not stop, keeping its state" "${_pair%%:*}"
       _rc=1
     else
@@ -836,14 +863,14 @@ supervise_up() {
   # store the PIDs of their commands there. Remember where the file is, to
   # identify the directory.
   _id=$(_config_id)
-  _SUPERVISE_STATEDIR=${XDG_STATE_HOME}/supervise/${_id}
+  _SUPERVISE_STATEDIR=${SUPERVISE_STATE_HOME}/${_id}
   mkdir -p "$_SUPERVISE_STATEDIR"
   readlink -f "$SUPERVISE_PATH" > "${_SUPERVISE_STATEDIR}/config.path"
   debug "up: Storing PIDs in %s" "$_SUPERVISE_STATEDIR"
 
   # Logs go to the same subdirectory under the runtime directory, created
   # private as the XDG spec requires.
-  _logdir=${XDG_RUNTIME_DIR}/supervise/${_id}
+  _logdir=${SUPERVISE_RUNTIME_DIR}/${_id}
   (umask 077 && mkdir -p "$_logdir")
   debug "up: Storing logs in %s" "$_logdir"
   unset _id || true
@@ -878,7 +905,7 @@ EOS
       _f=${_logdir}/${_cname}.log
       : >> "$_f"
       _lines=$(wc -l < "$_f")
-      tail -F -n +$((_lines + 1)) "$_f" 2>/dev/null &
+      exec tail -F -n +$((_lines + 1)) "$_f" 2>/dev/null &
       _tails="$_tails $!"
     done
   fi
@@ -1006,7 +1033,7 @@ supervise_log() {
   # Only the path matters, the file itself may have changed or be gone.
   [ -n "$SUPERVISE_PATH" ] || error "log: No file given, use -s"
 
-  _logdir=${XDG_RUNTIME_DIR}/supervise/$(_config_id)
+  _logdir=${SUPERVISE_RUNTIME_DIR}/$(_config_id)
   if [ ! -d "$_logdir" ]; then
     warn "log: No logs for %s, commands are only logged with up -d" "$SUPERVISE_PATH"
     return 0
@@ -1034,9 +1061,12 @@ supervise_log() {
   fi
 
   # Merge on the timestamp, i.e. the 3rd field, keeping the order of lines from
-  # the same second, rotated files included. Then follow new lines from all
+  # the same second, rotated files included. Nothing to print with -n 0: tail
+  # would exit at once and break the pipe. Then follow new lines from all
   # files, if requested, across rotations.
-  if [ -n "$_SUPERVISE_LOG_LINES" ]; then
+  if [ -n "$_SUPERVISE_LOG_LINES" ] && [ "$_SUPERVISE_LOG_LINES" -eq 0 ]; then
+    :
+  elif [ -n "$_SUPERVISE_LOG_LINES" ]; then
     _log_cat "$@" | sort -s -k3,3 | tail -n "$_SUPERVISE_LOG_LINES"
   else
     _log_cat "$@" | sort -s -k3,3
@@ -1045,6 +1075,24 @@ supervise_log() {
     exec tail -q -n 0 -F "$@" 2>/dev/null
   fi
   unset _SUPERVISE_LOG_LINES _SUPERVISE_LOG_FOLLOW _logdir _f _name || true
+}
+
+# Print the time since the process which PID is $1 started, as the etime of ps,
+# i.e. [[dd-]hh:]mm:ss. This uses /proc and the clock ticks per second in _hz,
+# as not all ps can select a process, e.g. busybox.
+_pid_uptime() {
+  _ustart=$(_pid_start "$1") || return 1
+  read -r _unow _ < /proc/uptime
+  _usecs=$((${_unow%.*} - _ustart / _hz))
+  [ "$_usecs" -ge 0 ] || _usecs=0
+  if [ "$_usecs" -ge 86400 ]; then
+    printf '%d-%02d:%02d:%02d\n' "$((_usecs / 86400))" "$((_usecs % 86400 / 3600))" "$((_usecs % 3600 / 60))" "$((_usecs % 60))"
+  elif [ "$_usecs" -ge 3600 ]; then
+    printf '%02d:%02d:%02d\n' "$((_usecs / 3600))" "$((_usecs % 3600 / 60))" "$((_usecs % 60))"
+  else
+    printf '%02d:%02d\n' "$((_usecs / 60))" "$((_usecs % 60))"
+  fi
+  unset _ustart _unow _usecs || true
 }
 
 # Print the ps line of the command which name is $1, using the state in
@@ -1062,7 +1110,7 @@ _ps_line() {
     # The run process is alive, the command might be waiting to restart.
     if _cpid=$(_alive_pid "${_statedir}/${1}.pid"); then
       _state=running
-      _uptime=$(ps -o etime= -p "$_cpid" | tr -d ' ')
+      _uptime=$(_pid_uptime "$_cpid" || echo -)
     else
       _state=restarting
       _cpid=-
@@ -1105,7 +1153,9 @@ supervise_ps() {
   _wanted=
   [ "$#" -gt 0 ] && _wanted=" $* "
   _found=" "
-  _statedir=${XDG_STATE_HOME}/supervise/$(_config_id)
+  _statedir=${SUPERVISE_STATE_HOME}/$(_config_id)
+  # Clock ticks per second, for the uptimes. 100 on almost all Linux systems.
+  _hz=$(getconf CLK_TCK 2>/dev/null || echo 100)
 
   printf '%-15s %-18s %8s %8s %10s %4s  %s\n' NAME STATE RUN PID UPTIME EXIT COMMAND
   # Commands from the file, if it still exists.
@@ -1172,7 +1222,7 @@ supervise_ls() {
   [ -n "$SUPERVISE_PATH" ] || error "ls: No file given, use -s"
 
   _found=" "
-  _statedir=${XDG_STATE_HOME}/supervise/$(_config_id)
+  _statedir=${SUPERVISE_STATE_HOME}/$(_config_id)
   # Commands from the file, if it still exists.
   if [ -r "$SUPERVISE_PATH" ]; then
     _tab=$(printf '\t')
@@ -1205,8 +1255,14 @@ EOF
 
 # How to run this script again, e.g. for run and logger: directly when it is
 # executable, through the shell running it otherwise, e.g. sh supervise.sh.
+# Busybox needs the name of its shell applet, e.g. on Alpine.
 _SUPERVISE_SHELL=
-[ -x "$0" ] || _SUPERVISE_SHELL=$(readlink /proc/$$/exe)
+if ! [ -x "$0" ]; then
+  _SUPERVISE_SHELL=$(readlink /proc/$$/exe)
+  case "$_SUPERVISE_SHELL" in
+    */busybox) _SUPERVISE_SHELL="$_SUPERVISE_SHELL sh";;
+  esac
+fi
 
 # Whether printf can format time, see _log. Empty until tested at the first log
 # line, inherited from the calling process otherwise. Exported, as we call
@@ -1214,12 +1270,8 @@ _SUPERVISE_SHELL=
 : "${_SUPERVISE_PRINTF_TIME:=""}"
 export _SUPERVISE_PRINTF_TIME
 
-# Internal state: list of live spawned PIDs, and name to log under, the basename
-# of this script without its extension, computed once without forking, unless
-# set by logger -n.
+# Internal state: list of live spawned PIDs.
 _SUPERVISE_PIDS=
-_SUPERVISE_LOGNAME=${0##*/}
-_SUPERVISE_LOGNAME=${_SUPERVISE_LOGNAME%.*}
 
 # Validate settings, whether set through options or from the environment.
 _bytes "$SUPERVISE_LOGSIZE" > /dev/null

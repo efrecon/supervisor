@@ -77,7 +77,24 @@ The lines are evaluated by the shell, so `$VAR` and `$(...)` are expanded when t
 Use single quotes to pass them to the command instead.
 The configuration file is code: only use files that you trust.
 
-The file [supervise.cfg](supervise.cfg) is a self-contained example.
+### Examples
+
+The following configuration only depends on `sh` and standard utilities, so it runs anywhere.
+Save it as `supervise.cfg` and run `./supervise.sh up` to see the commands at work.
+
+```text
+# Long-running process logging the time on stdout every 5 seconds.
+clock: sh -c 'while true; do date; sleep 5; done'
+
+# Writes to both stdout and stderr, shown as [OUT] and [ERR] lines.
+streams: sh -c 'while true; do echo "to stdout"; echo "to stderr" >&2; sleep 7; done'
+
+# Fails after 3 seconds, and is restarted with an increasing delay.
+flaky: sh -c 'echo "starting as $$"; sleep 3; echo "failing" >&2; exit 1'
+
+# One-shot command without a name: it succeeds, so it is not restarted.
+sh -c 'echo "done once"'
+```
 
 ## Commands
 
@@ -191,6 +208,8 @@ Each option has an environment variable counterpart, which the option overrides.
 | `-k` | `SUPERVISE_LOGKEEP` | `5` | Number of rotated log files to keep. |
 | `-v` | `SUPERVISE_VERBOSE` | `0` | Verbosity, repeat `-v` to increase. |
 | | `SUPERVISE_NAME` | | Name of the command for `run`, same as its `-n` option. |
+| | `SUPERVISE_STATE_HOME` | `$XDG_STATE_HOME/supervise` | Directory for the state of the commands. |
+| | `SUPERVISE_RUNTIME_DIR` | `$XDG_RUNTIME_DIR/supervise` | Directory for the logs of the commands. |
 
 Invalid values are rejected before any command runs.
 `up` passes these settings to the commands it starts.
@@ -201,7 +220,10 @@ Each configuration file gets its own directories,
 named after the basename of the file and a short hash of its resolved path, e.g. `supervise.cfg-4c57b75eed5b`.
 Only the path is used, so the directories stay the same when the file is edited.
 
-Under `$XDG_STATE_HOME/supervise/`, i.e. `~/.local/state/supervise/` by default:
+These directories are created under directories named after the script, without its extension:
+a copy called `procs.sh` uses `procs/` instead of `supervise/`.
+
+Under `$SUPERVISE_STATE_HOME`, i.e. `~/.local/state/supervise/` by default:
 
 - `config.path`: the resolved path of the configuration file.
 - `<name>.run`: the PID of the `run` process of the command, and its start time.
@@ -212,10 +234,37 @@ Under `$XDG_STATE_HOME/supervise/`, i.e. `~/.local/state/supervise/` by default:
 A process is only considered alive when both its PID and start time match,
 so PIDs reused by other processes, e.g. after a reboot, are never mistaken for the commands.
 
-Under `$XDG_RUNTIME_DIR/supervise/`, created with `0700` permissions:
+Under `$SUPERVISE_RUNTIME_DIR`, i.e. `$XDG_RUNTIME_DIR/supervise/` by default, created with `0700` permissions:
 
 - `<name>.log`: the logs of the command, and of its `run` process.
 - `<name>.log.1` to `<name>.log.N`: rotated logs, `.1` being the newest.
+
+## Tests
+
+The tests are in the [tests](tests) directory, and only need the same tools as the script.
+Run them all, or only the tests of some files:
+
+```sh
+tests/run.sh
+tests/run.sh tests/test_units.sh
+```
+
+- `test_units.sh` tests the internal functions of the script, sourced without running any command.
+- `test_cli.sh` tests the help, the options, and the `run` and `logger` commands.
+- `test_up.sh` tests `up`, `down`, `ps`, `ls` and `log`, from configuration files.
+
+Each test runs in its own process and temporary directory, with private XDG directories,
+so it does not interfere with running commands.
+The output follows the TAP format, and the exit code is `1` when a test fails.
+Set `TEST_SHELL` to run the tests, and the script, with another shell, e.g. `TEST_SHELL=dash tests/run.sh`.
+The tests run on every pull request with bash, dash, mksh, yash, and the ash of busybox.
+To test with the ash shell and utilities of busybox, run the tests in Alpine:
+
+```sh
+docker run --rm -v "$PWD:/src:ro" -w /src alpine:3.22 tests/run.sh
+```
+
+Set `TEST_ONLY` to a pattern to only run the matching tests, e.g. `TEST_ONLY=rotate tests/run.sh`.
 
 ## Limitations
 
