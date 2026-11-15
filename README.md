@@ -5,6 +5,11 @@ It runs commands in the background, restarts them when they fail, and keeps thei
 It can supervise a single command, or a set of commands described in a configuration file,
 in the spirit of a minimal `docker compose` for plain processes.
 
+> [!NOTE]
+> While some of the code was originally [migrated][origin], most of this project is AI written.
+
+  [origin]: https://github.com/efrecon/devenv-code-tunnel/blob/main/share/orchestration/supervise.sh
+
 ## Features
 
 - Restart failed commands, with an exponential backoff between restarts.
